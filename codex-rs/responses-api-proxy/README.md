@@ -1,6 +1,10 @@
 # codex-responses-api-proxy
 
-A strict HTTP proxy that only forwards `POST` requests to `/v1/responses` to the OpenAI API (`https://api.openai.com`), injecting the `Authorization: Bearer $OPENAI_API_KEY` header. Everything else is rejected with `403 Forbidden`.
+A strict HTTP proxy that only forwards `POST` requests to `/v1/responses` to the OpenAI API (`https://api.openai.com`), injecting the upstream `Authorization: Bearer $OPENAI_API_KEY` header. Everything else is rejected with `403 Forbidden`.
+
+The proxy can optionally enforce downstream client API keys, so callers must send their own `Authorization: Bearer <downstream-key>` header to access the proxy.
+
+When downstream key mode is enabled, the proxy also tracks per-client token usage by parsing `usage` in Responses API payloads, including `response.completed` SSE events.
 
 ## Expected Usage
 
@@ -36,18 +40,55 @@ curl --fail --silent --show-error "${PROXY_BASE_URL}/shutdown"
 - Accepts exactly `POST /v1/responses` (no query string). The request body is forwarded to `https://api.openai.com/v1/responses` with `Authorization: Bearer <key>` set. All original request headers (except any incoming `Authorization`) are forwarded upstream, with `Host` overridden to `api.openai.com`. For other requests, it responds with `403`.
 - Optionally writes a single-line JSON file with server info, currently `{ "port": <u16>, "pid": <u32> }`.
 - Optional `--http-shutdown` enables `GET /shutdown` to terminate the process with exit code `0`. This allows one user (e.g., `root`) to start the proxy and another unprivileged user on the host to shut it down.
+- `GET /metrics` returns per-client aggregated usage counters.
 
 ## CLI
 
 ```
-codex-responses-api-proxy [--port <PORT>] [--server-info <FILE>] [--http-shutdown] [--upstream-url <URL>]
+codex-responses-api-proxy [--port <PORT>] [--server-info <FILE>] [--http-shutdown] [--upstream-url <URL>] [--downstream-api-keys <FILE>] [--generate-downstream-api-key]
 ```
 
 - `--port <PORT>`: Port to bind on `127.0.0.1`. If omitted, an ephemeral port is chosen.
 - `--server-info <FILE>`: If set, the proxy writes a single line of JSON with `{ "port": <PORT>, "pid": <PID> }` once listening.
 - `--http-shutdown`: If set, enables `GET /shutdown` to exit the process with code `0`.
 - `--upstream-url <URL>`: Absolute URL to forward requests to. Defaults to `https://api.openai.com/v1/responses`.
+- `--downstream-api-keys <FILE>`: Optional JSON file defining downstream client API keys. When set, incoming requests must present a valid downstream Bearer key.
+- `--generate-downstream-api-key`: Print a newly generated downstream key (`dsk_...`) and exit.
 - Authentication is fixed to `Authorization: Bearer <key>` to match the Codex CLI expectations.
+
+### Downstream key file format
+
+When `--downstream-api-keys` is provided, load keys from JSON in this format:
+
+```json
+{
+  "keys": [
+    { "client_id": "client-a", "api_key": "dsk_..." },
+    { "client_id": "client-b", "api_key": "dsk_..." }
+  ]
+}
+```
+
+Requests missing a valid downstream `Authorization: Bearer <api_key>` header are rejected with `401 Unauthorized`.
+
+### Metrics format
+
+`GET /metrics` returns JSON usage counters grouped by `client_id`:
+
+```json
+{
+  "clients": {
+    "client-a": {
+      "requests": 2,
+      "input_tokens": 42,
+      "output_tokens": 15,
+      "cached_input_tokens": 3,
+      "reasoning_output_tokens": 1,
+      "total_tokens": 57
+    }
+  }
+}
+```
 
 For Azure, for example (ensure your deployment accepts `Authorization: Bearer <key>`):
 
